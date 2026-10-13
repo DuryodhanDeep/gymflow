@@ -170,7 +170,6 @@ h2 { margin: 0; font-size: 24px; line-height: 1.15; letter-spacing: -.6px; }
 .field-label input::placeholder, .field-label textarea::placeholder { color: #718879; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .three-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.add-activity-button { margin-left: auto;}
 .editor-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .editor-section-heading h2 { font-size: 19px; }
 .editor-section-heading p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
@@ -197,3 +196,10 @@ h2 { margin: 0; font-size: 24px; line-height: 1.15; letter-spacing: -.6px; }
   .sets-header.strength-grid, .set-row.strength-grid { grid-template-columns: 27px minmax(0, 1fr) minmax(0, .75fr) 29px; gap: 5px; }
   .sets-header.cardio-grid, .set-row.cardio-grid { grid-template-columns: 27px minmax(0, 1fr) 29px; gap: 5px; }
 }
+
+/* Stage 3: compact restore confirmation, intentionally minimal UI */
+.backup-dialog-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.76); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 1000; }
+.backup-dialog { width: min(100%, 440px); max-height: 85vh; overflow: auto; padding: 24px; border: 1px solid #36654e; border-radius: 18px; background: #142b22; color: #f3f7f3; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.backup-dialog h2 { margin: 0 0 16px; }
+.backup-dialog p { margin: 12px 0; overflow-wrap: anywhere; line-height: 1.5; }
+.backup-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 22px; }

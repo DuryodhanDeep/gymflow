@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, ArrowDown, ArrowUp, CalendarDays, Check, CheckCircle2, ChevronLeft,
   ChevronRight, CircleHelp, Dumbbell, History, House, Layers3,
@@ -6,6 +6,7 @@ import {
   WifiOff, X, XCircle
 } from "lucide-react";
 import { readValue, writeValue } from "./lib/db.js";
+import { createBackup, parseBackup, MAX_BACKUP_BYTES } from "./lib/backup.js";
 import { INITIAL_STATE, migrateState, normalizeExercise, normalizePlan } from "./lib/seed.js";
 
 const navItems = [
@@ -59,6 +60,9 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [notice, setNotice] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [pendingRestore, setPendingRestore] = useState(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,6 +92,59 @@ function App() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 3200);
   }
+  async function exportBackup() {
+    if (backupBusy || storageError) return;
+    setBackupBusy(true);
+    try {
+      // Ensure the exact state being exported has been persisted successfully.
+      await writeValue("state", appState);
+      const blob = new Blob([JSON.stringify(createBackup(appState), null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `gymflow-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showNotice("Backup file prepared. Keep it somewhere safe.");
+    } catch (error) {
+      showNotice(`Export failed: ${error.message || "Could not save backup."}`);
+    } finally { setBackupBusy(false); }
+  }
+
+  async function inspectBackupFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || backupBusy) return;
+    setPendingRestore(null);
+    if (file.size > MAX_BACKUP_BYTES) { showNotice("Backup is too large (15 MB maximum)."); return; }
+    setBackupBusy(true);
+    try {
+      const parsed = parseBackup(await file.text());
+      setPendingRestore({ ...parsed, filename: file.name });
+    } catch (error) {
+      showNotice(`Import rejected: ${error.message}`);
+    } finally { setBackupBusy(false); }
+  }
+
+  async function confirmRestore() {
+    if (!pendingRestore || backupBusy) return;
+    setBackupBusy(true);
+    try {
+      // Persist first. Only replace the visible app state if the transaction succeeds.
+      await writeValue("state", pendingRestore.state);
+      setAppState(pendingRestore.state);
+      setStorageError("");
+      setSelectedPlanId(null);
+      setPendingRestore(null);
+      setPage("home");
+      showNotice("Backup restored. Your plans, rotation and sessions are available.");
+    } catch (error) {
+      showNotice(`Restore failed: ${error.message || "Could not write local data."}`);
+    } finally { setBackupBusy(false); }
+  }
+
   function startOrResumeWorkout() {
     if (appState.activeSession) { setPage("workout"); return; }
     const plan = appState.override || nextPlan;
@@ -132,34 +189,22 @@ function App() {
     setPage("home");
     showNotice("Session abandoned. Rotation unchanged; temporary workout edits discarded.");
   }
-  function chooseOverride(plan) {
-    if (appState.activeSession) { showNotice("Finish or abandon the active workout before customizing the next session."); return; }
-    if (plan.id === nextPlan.id) {
-      if (appState.override) {
-        setAppState((current) => ({ ...current, override: null }));
-        showNotice("One-time workout cleared. Your normal next plan is restored.");
-      } else {
-        showNotice("This is already your next plan in the normal rotation.");
-      }
+  function clearTemporaryWorkout() {
+    if (appState.activeSession) {
+      showNotice("Finish or abandon the active workout before clearing temporary edits.");
       return;
     }
-    if (appState.override && appState.override.id === plan.id) {
-      setAppState((current) => ({ ...current, override: null }));
-      showNotice("One-time workout cleared. Your normal next plan is restored.");
-      return;
-    }
-    const selected = clonePlan(plan);
-    setAppState((current) => ({ ...current, override: { ...selected, sourcePlanId: plan.id, isCustomized: false, temporary: true } }));
-    showNotice(`${plan.name} selected for the next session only.`);
-    setPage("home");
+    if (!appState.override) return;
+    setAppState((current) => ({ ...current, override: null }));
+    showNotice("Temporary edits cleared. Your next master plan is unchanged.");
   }
   function saveMasterPlan(updatedPlan) {
     const normalized = normalizePlan(updatedPlan, plans.findIndex((plan) => plan.id === updatedPlan.id));
     setAppState((current) => ({
       ...current,
       masterPlans: current.masterPlans.map((plan) => plan.id === normalized.id ? normalized : plan),
-      // An uncustomized one-time selection follows master edits; a customized temporary
-      // workout stays independent, and an active session is always its own snapshot.
+      // Legacy uncustomized temporary plans follow master edits; customized temporary
+      // workouts stay independent, and an active session is always its own snapshot.
       override: current.override?.sourcePlanId === normalized.id && !current.override.isCustomized
         ? { ...clonePlan(normalized), sourcePlanId: normalized.id, isCustomized: false, temporary: true }
         : current.override
@@ -193,14 +238,22 @@ function App() {
     {storageError && <div className="error-banner" role="alert"><ShieldCheck size={18} /><div><strong>Local storage issue</strong><p>{storageError} Your changes may not be saved.</p></div></div>}
     <main className="main-content">
       {page === "home" && <HomePage nextPlan={nextWorkout} normalNextPlan={nextPlan} hasActive={Boolean(appState.activeSession)} hasOverride={Boolean(appState.override)} onStart={startOrResumeWorkout} onNavigate={setPage} onCustomize={openTemporaryEditor} />}
-      {page === "plans" && <PlansPage plans={plans} nextPlan={nextPlan} override={appState.override} hasActive={Boolean(appState.activeSession)} onEditMaster={openMasterEditor} onCustomize={openTemporaryEditor} onChooseOverride={chooseOverride} />}
+      {page === "plans" && <PlansPage plans={plans} nextPlan={nextPlan} override={appState.override} hasActive={Boolean(appState.activeSession)} onEditMaster={openMasterEditor} onCustomize={openTemporaryEditor} onClearTemporary={clearTemporaryWorkout} />}
       {page === "master-editor" && selectedMasterPlan && <PlanEditor key={`master-${selectedMasterPlan.id}`} plan={selectedMasterPlan} mode="master" onCancel={() => setPage("plans")} onSave={saveMasterPlan} />}
       {page === "next-editor" && <PlanEditor key={`temporary-${(appState.override || nextPlan).id}-${appState.override?.isCustomized ? "custom" : "normal"}`} plan={{ ...(appState.override || nextPlan), sourcePlanId: appState.override?.sourcePlanId || nextPlan.id }} mode="temporary" onCancel={() => setPage("home")} onSave={saveTemporaryWorkout} />}
       {page === "workout" && appState.activeSession && <WorkoutPage session={appState.activeSession} onBack={() => setPage("home")} onUpdate={updateActiveSession} onFinish={finishWorkout} onAbandon={abandonWorkout} />}
       {page === "workout" && !appState.activeSession && <HomePage nextPlan={nextWorkout} normalNextPlan={nextPlan} hasActive={false} hasOverride={Boolean(appState.override)} onStart={startOrResumeWorkout} onNavigate={setPage} onCustomize={openTemporaryEditor} />}
       {page === "progress" && <ProgressPage sessions={appState.sessions} completedSessions={completedSessions} />}
-      {page === "settings" && <SettingsPage onNotice={showNotice} />}
+      {page === "settings" && <SettingsPage onNotice={showNotice} onExport={exportBackup} onSelectImport={() => fileInputRef.current?.click()} busy={backupBusy} />}
     </main>
+    <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={inspectBackupFile} style={{ display: "none" }} aria-label="Choose GymFlow backup file" />
+    {pendingRestore && <div className="backup-dialog-backdrop" role="presentation"><section className="backup-dialog" role="dialog" aria-modal="true" aria-labelledby="restore-title">
+      <h2 id="restore-title">Restore GymFlow backup?</h2>
+      <p><strong>{pendingRestore.filename}</strong></p>
+      <p>{pendingRestore.summary.plans} plans · {pendingRestore.summary.sessions} recorded sessions · {pendingRestore.summary.active ? "Active workout included" : "No active workout"} · {pendingRestore.summary.temporary ? "Temporary workout included" : "No temporary workout"}</p>
+      <p><strong>This replaces all current local plans, rotation, active workout and history.</strong> Export your current data first if you might need it later.</p>
+      <div className="backup-dialog-actions"><button className="button button-secondary" disabled={backupBusy} onClick={() => setPendingRestore(null)}>Cancel</button><button className="button button-primary" disabled={backupBusy} onClick={confirmRestore}>{backupBusy ? "Restoring…" : "Replace local data"}</button></div>
+    </section></div>}
     {notice && <div className="toast" role="status">{notice}</div>}
     {!["workout", "master-editor", "next-editor"].includes(page) && <nav className="bottom-nav" aria-label="Main navigation">{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? "active" : ""}`} onClick={() => setPage(id)} aria-current={page === id ? "page" : undefined}><Icon size={21} strokeWidth={page === id ? 2.4 : 1.8} /><span>{label}</span></button>)}</nav>}
   </div>;
@@ -211,7 +264,7 @@ function HomePage({ nextPlan, normalNextPlan, hasActive, hasOverride, onStart, o
   return <div className="page-stack">
     <section className="welcome-row"><div><p className="eyebrow">YOUR NEXT SESSION</p><h1>Ready when<br />you are.</h1></div><div className="hero-icon"><Activity size={31} /></div></section>
     <section className="next-workout-card">
-      <div className="card-topline"><span className="eyebrow">{hasOverride ? "ONE-TIME WORKOUT" : `UP NEXT · PLAN ${planNumber} OF ${normalNextPlan ? 5 : 5}`}</span><span className="plan-symbol"><Dumbbell size={18} /></span></div>
+      <div className="card-topline"><span className="eyebrow">{hasOverride ? "CUSTOMIZED NEXT WORKOUT" : `UP NEXT · PLAN ${planNumber} OF 5`}</span><span className="plan-symbol"><Dumbbell size={18} /></span></div>
       <h2>{nextPlan.name}</h2><p className="muted plan-focus">{nextPlan.focus}</p>
       <div className="plan-meta"><span><CalendarDays size={15} /> {nextPlan.durationMinutes} min</span><span><Layers3 size={15} /> {nextPlan.exercises.length} activities</span></div>
       <div className="rotation-track" aria-label={`Next normal plan ${planNumber} of 5`}>{Array.from({ length: 5 }, (_, index) => <span key={index} className={`rotation-segment ${index === planNumber - 1 ? "current" : ""}`} />)}</div>
@@ -221,26 +274,25 @@ function HomePage({ nextPlan, normalNextPlan, hasActive, hasOverride, onStart, o
       {!hasActive && <button className="button button-secondary button-large home-customize" onClick={onCustomize}><Sparkles size={17} /> Customize this workout</button>}
       <p className="card-footnote">Rotation advances only when you confirm a workout complete.</p>
     </section>
-    <div className="quick-actions"><button className="quick-action" onClick={() => onNavigate("plans")}><span className="quick-icon"><Dumbbell size={19} /></span><span><strong>Manage plans</strong><small>Edit master plans or choose a one-time workout</small></span><ChevronRight size={18} /></button><button className="quick-action" onClick={() => onNavigate("progress")}><span className="quick-icon"><History size={19} /></span><span><strong>Workout history</strong><small>Review completed and abandoned sessions</small></span><ChevronRight size={18} /></button></div>
+    <div className="quick-actions"><button className="quick-action" onClick={() => onNavigate("plans")}><span className="quick-icon"><Dumbbell size={19} /></span><span><strong>Manage plans</strong><small>Edit master plans or customize the next workout</small></span><ChevronRight size={18} /></button><button className="quick-action" onClick={() => onNavigate("progress")}><span className="quick-icon"><History size={19} /></span><span><strong>Workout history</strong><small>Review completed and abandoned sessions</small></span><ChevronRight size={18} /></button></div>
     <div className="info-strip"><WifiOff size={17} /><p><strong>Designed for the gym.</strong> Sessions and logs are saved on this device.</p></div>
   </div>;
 }
 
-function PlansPage({ plans, nextPlan, override, hasActive, onEditMaster, onCustomize, onChooseOverride }) {
+function PlansPage({ plans, nextPlan, override, hasActive, onEditMaster, onCustomize, onClearTemporary }) {
   return <div className="page-stack">
-    <div className="page-heading"><p className="eyebrow">YOUR ROUTINE</p><h1>Workout plans</h1><p className="muted">Master plans are permanent. A one-time workout is temporary.</p></div>
+    <div className="page-heading"><p className="eyebrow">YOUR ROUTINE</p><h1>Workout plans</h1><p className="muted">Master plans are permanent. Customize the next workout without changing its master plan.</p></div>
     <button className="button button-secondary button-large" onClick={onCustomize} disabled={hasActive}><Sparkles size={17} /> Customize next workout</button>
     {hasActive && <div className="info-strip"><CircleHelp size={17} /><p>You can still edit master plans, but changing the next workout is disabled while a session is active.</p></div>}
     <div className="plan-list">{plans.map((plan, index) => {
-      const selected = override?.id === plan.id;
-      const isNormalNext = !override && nextPlan.id === plan.id;
-      return <article key={plan.id} className={`plan-list-card plan-select-card ${selected ? "selected" : ""}`}>
+      const isNextRotationSlot = nextPlan.id === plan.id;
+      return <article key={plan.id} className="plan-list-card plan-select-card">
         <span className="plan-number">{index + 1}</span>
-        <span className="plan-list-copy"><strong>{plan.name}</strong><small>{plan.focus}</small><small>{plan.durationMinutes} min · {plan.exercises.length} activities</small>{isNormalNext && <small className="tag-current">Normal next plan</small>}{selected && <small className="tag-current">Selected for next session</small>}</span>
-        <div className="plan-card-actions"><button className="button button-secondary plan-edit-button" onClick={() => onEditMaster(plan.id)}>Edit</button><button className="button button-secondary plan-select-button" disabled={hasActive} onClick={() => onChooseOverride(plan)}>{isNormalNext ? "Next" : selected ? "Clear" : "Use once"}</button></div>
+        <span className="plan-list-copy"><strong>{plan.name}</strong><small>{plan.focus}</small><small>{plan.durationMinutes} min · {plan.exercises.length} activities</small>{isNextRotationSlot && <small className="tag-current">Next in rotation</small>}</span>
+        <div className="plan-card-actions"><button className="button button-secondary plan-edit-button" onClick={() => onEditMaster(plan.id)}>Edit</button></div>
       </article>;
     })}</div>
-    {override && <button className="button button-secondary button-large" onClick={() => onChooseOverride(nextPlan)} disabled={hasActive}><RotateCcw size={17} /> Clear temporary workout</button>}
+    {override && <button className="button button-secondary button-large" onClick={onClearTemporary} disabled={hasActive}><RotateCcw size={17} /> Clear temporary edits</button>}
     <div className="info-strip"><ShieldCheck size={17} /><p>Master edits are saved permanently. Temporary workout edits are discarded when the workout is completed or abandoned.</p></div>
   </div>;
 }
@@ -273,12 +325,12 @@ function PlanEditor({ plan, mode, onCancel, onSave }) {
     if (!name) { setValidation("Give this plan a name before saving."); return; }
     if (!draft.exercises.length) { setValidation("Add at least one activity before saving."); return; }
     if (draft.exercises.some((exercise) => !exercise.name.trim())) { setValidation("Every activity needs a name, or remove the empty activity."); return; }
-    const normalized = normalizePlan({ ...draft, name, focus: draft.focus.trim(), exercises: draft.exercises.map((exercise, index) => normalizeExercise(exercise, index, draft.id)) });
+    const normalized = normalizePlan({ ...draft, name, focus: draft.focus.trim(), exercises: draft.exercises.map((exercise, index) => normalizeExercise({ ...exercise, name: exercise.name.trim() }, index, draft.id)) });
     onSave({ ...normalized, sourcePlanId: draft.sourcePlanId || draft.id, isCustomized: temporary ? true : undefined, temporary: temporary || undefined });
   }
   return <div className="page-stack editor-page">
     <button className="back-button" onClick={onCancel}><ChevronLeft size={18} /> Cancel and go back</button>
-    <div className="page-heading"><p className="eyebrow">{temporary ? "ONE-TIME EDITOR" : "MASTER PLAN EDITOR"}</p><h1>{temporary ? "Customize next workout" : "Edit master plan"}</h1><p className="muted">{temporary ? "Changes apply to this next session only. The master plan stays untouched." : "Changes are saved permanently for future sessions. An active workout keeps its existing snapshot."}</p></div>
+    <div className="page-heading"><p className="eyebrow">{temporary ? "TEMPORARY WORKOUT EDITOR" : "MASTER PLAN EDITOR"}</p><h1>{temporary ? "Customize next workout" : "Edit master plan"}</h1><p className="muted">{temporary ? "Changes apply to the next workout only. The master plan stays untouched." : "Changes are saved permanently for future sessions. An active workout keeps its existing snapshot."}</p></div>
     <section className="editor-panel">
       <label className="field-label">Plan name<input value={draft.name} onChange={(event) => updatePlan("name", event.target.value)} placeholder="e.g. Lower Body" /></label>
       <label className="field-label">Focus / description<input value={draft.focus} onChange={(event) => updatePlan("focus", event.target.value)} placeholder="e.g. Legs and stability" /></label>
@@ -294,7 +346,7 @@ function PlanEditor({ plan, mode, onCancel, onSave }) {
       {exercise.type === "distance" && <div className="field-grid"><label className="field-label">Target distance<input value={exercise.distance} onChange={(event) => updateExercise(index, "distance", event.target.value)} placeholder="3" /></label><label className="field-label">Unit<select value={exercise.distanceUnit} onChange={(event) => updateExercise(index, "distanceUnit", event.target.value)}><option value="km">Kilometres (km)</option><option value="mi">Miles (mi)</option><option value="m">Metres (m)</option></select></label></div>}
       <label className="field-label">Notes (optional)<textarea value={exercise.notes} onChange={(event) => updateExercise(index, "notes", event.target.value)} rows="2" placeholder="Form cues, alternatives, pace, equipment…" /></label>
     </section>)}
-    <div className="editor-section-heading" style={{ display: "flex", justifyContent: "flex-end" }}><button className="button button-secondary add-activity-button" onClick={addExercise}><Plus size={16} /> Add activity</button></div>
+    <div className="editor-section-heading"><button className="button button-secondary add-activity-button" onClick={addExercise}><Plus size={16} /> Add activity</button></div>
     {validation && <div className="validation-message" role="alert">{validation}</div>}
     <div className="editor-footer"><button className="button button-primary button-large" onClick={save}><Check size={18} /> {temporary ? "Save temporary workout" : "Save master plan"}</button><button className="button button-secondary button-large" onClick={onCancel}><X size={17} /> Cancel</button></div>
     <p className="editor-footnote">{temporary ? "This custom version is discarded after the next workout is completed or abandoned. Cancel leaves the current plan unchanged." : "Reordering, adding, editing or deleting activities affects the master plan only. An active workout is not modified."}</p>
@@ -310,7 +362,7 @@ function WorkoutPage({ session, onBack, onUpdate, onFinish, onAbandon }) {
   }
   return <div className="page-stack workout-page">
     <button className="back-button" onClick={onBack}><ChevronLeft size={18} /> Back to home</button>
-    <div className="page-heading"><p className="eyebrow">{session.usedOverride ? "ONE-TIME SESSION SNAPSHOT" : "WORKOUT IN PROGRESS"}</p><h1>{session.planName}</h1><p className="muted">{session.planFocus}</p></div>
+    <div className="page-heading"><p className="eyebrow">{session.usedOverride ? "TEMPORARY WORKOUT SNAPSHOT" : "WORKOUT IN PROGRESS"}</p><h1>{session.planName}</h1><p className="muted">{session.planFocus}</p></div>
     <section className="session-progress-card"><div className="session-progress-head"><span>{doneSets} of {totalSets} sets checked</span><strong>{progress}%</strong></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>Your workout is a snapshot. Master-plan edits won't change this active session.</small></section>
     {session.exercises.map((exercise, exerciseIndex) => {
       const isStrength = exercise.type !== "timed" && exercise.type !== "distance";
@@ -327,10 +379,21 @@ function WorkoutPage({ session, onBack, onUpdate, onFinish, onAbandon }) {
 
 function ProgressPage({ sessions, completedSessions }) {
   const recentSessions = useMemo(() => sessions.slice().sort((a, b) => new Date(b.completedAt || b.abandonedAt || b.startedAt) - new Date(a.completedAt || a.abandonedAt || a.startedAt)), [sessions]);
-  return <div className="page-stack"><div className="page-heading"><p className="eyebrow">YOUR JOURNEY</p><h1>Progress</h1><p className="muted">A record of your workouts, not just perfect days.</p></div><section className="stat-grid"><div className="stat-card"><span className="stat-icon"><CheckCircle2 size={19} /></span><strong>{completedSessions.length}</strong><small>Completed workouts</small></div><div className="stat-card"><span className="stat-icon"><Activity size={19} /></span><strong>{sessions.length}</strong><small>Recorded sessions</small></div></section>{recentSessions.length === 0 ? <section className="empty-state"><div className="empty-icon"><History size={27} /></div><h2>No workout history yet</h2><p>Your completed and abandoned sessions will appear here.</p></section> : <section className="history-list"><h2>Recent sessions</h2>{recentSessions.map((session) => <article className="history-card" key={session.id}><div className={`history-status ${session.status}`}>{session.status === "completed" ? <CheckCircle2 size={17} /> : <XCircle size={17} />}</div><div className="history-copy"><strong>{session.planName}</strong><small>{new Date(session.completedAt || session.abandonedAt || session.startedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</small><small>{session.status === "completed" ? "Completed" : "Abandoned"}{session.usedOverride ? " · one-time choice" : ""}</small></div><span className={`status-label ${session.status}`}>{session.status}</span></article>)}</section>}</div>;
+  return <div className="page-stack"><div className="page-heading"><p className="eyebrow">YOUR JOURNEY</p><h1>Progress</h1><p className="muted">A record of your workouts, not just perfect days.</p></div><section className="stat-grid"><div className="stat-card"><span className="stat-icon"><CheckCircle2 size={19} /></span><strong>{completedSessions.length}</strong><small>Completed workouts</small></div><div className="stat-card"><span className="stat-icon"><Activity size={19} /></span><strong>{sessions.length}</strong><small>Recorded sessions</small></div></section>{recentSessions.length === 0 ? <section className="empty-state"><div className="empty-icon"><History size={27} /></div><h2>No workout history yet</h2><p>Your completed and abandoned sessions will appear here.</p></section> : <section className="history-list"><h2>Recent sessions</h2>{recentSessions.map((session) => <article className="history-card" key={session.id}><div className={`history-status ${session.status}`}>{session.status === "completed" ? <CheckCircle2 size={17} /> : <XCircle size={17} />}</div><div className="history-copy"><strong>{session.planName}</strong><small>{new Date(session.completedAt || session.abandonedAt || session.startedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</small><small>{session.status === "completed" ? "Completed" : "Abandoned"}{session.usedOverride ? " · temporary workout" : ""}</small></div><span className={`status-label ${session.status}`}>{session.status}</span></article>)}</section>}</div>;
 }
-function SettingsPage({ onNotice }) {
-  return <div className="page-stack"><div className="page-heading"><p className="eyebrow">PREFERENCES</p><h1>Settings</h1><p className="muted">Your app, your routine.</p></div><section className="settings-card"><div className="settings-row"><span className="settings-icon"><ShieldCheck size={19} /></span><span><strong>Local-first storage</strong><small>Your workout data stays on this device in v1.</small></span><span className="settings-status">On</span></div><div className="settings-row"><span className="settings-icon"><Activity size={19} /></span><span><strong>Appearance</strong><small>Dark green theme</small></span></div><div className="settings-row"><span className="settings-icon"><History size={19} /></span><span><strong>Backup and restore</strong><small>Export and import will be added in a later stage.</small></span><ChevronRight size={18} /></div></section><button className="button button-secondary button-large" onClick={() => onNotice("GymFlow · master plan and temporary workout editors, sessions and rotation.")}>View app information</button><p className="version-note">GymFlow · Stage 2.1 · v0.3.0</p></div>;
+function SettingsPage({ onNotice, onExport, onSelectImport, busy }) {
+  return <div className="page-stack"><div className="page-heading"><p className="eyebrow">PREFERENCES</p><h1>Settings</h1><p className="muted">Your app, your routine.</p></div>
+    <section className="settings-card">
+      <div className="settings-row"><span className="settings-icon"><ShieldCheck size={19} /></span><span><strong>Local-first storage</strong><small>Your workout data stays on this device unless you export it.</small></span><span className="settings-status">On</span></div>
+      <div className="settings-row"><span className="settings-icon"><Activity size={19} /></span><span><strong>Appearance</strong><small>Dark green theme</small></span></div>
+      <div className="settings-row"><span className="settings-icon"><History size={19} /></span><span><strong>Backup and restore</strong><small>Save a JSON backup or restore one. Import replaces all local workout data.</small></span></div>
+    </section>
+    <button className="button button-primary button-large" disabled={busy} onClick={onExport}>Export backup</button>
+    <button className="button button-secondary button-large" disabled={busy} onClick={onSelectImport}>Import backup</button>
+    <p className="muted">Keep your backup file private. It contains your plans and workout history. There is no automatic cloud sync.</p>
+    <button className="button button-secondary button-large" onClick={() => onNotice("GymFlow · local backup and restore, workout editors, sessions and rotation.")}>View app information</button>
+    <p className="version-note">GymFlow · Stage 3 · v0.4.0</p>
+  </div>;
 }
 
 export default App;

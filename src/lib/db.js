@@ -36,7 +36,9 @@ export async function readValue(key) {
   }
 }
 
-export async function writeValue(key, value) {
+let pendingWrite = Promise.resolve();
+
+async function performWrite(key, value) {
   const db = await openDatabase();
   try {
     return await new Promise((resolve, reject) => {
@@ -49,4 +51,11 @@ export async function writeValue(key, value) {
   } finally {
     db.close();
   }
+}
+
+// Serialize writes so a slow older save cannot overwrite a newer restore.
+export function writeValue(key, value) {
+  const next = pendingWrite.catch(() => {}).then(() => performWrite(key, value));
+  pendingWrite = next;
+  return next;
 }
