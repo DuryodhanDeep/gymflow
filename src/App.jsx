@@ -237,7 +237,7 @@ function PlansPage({ plans, nextPlan, override, hasActive, onEditMaster, onCusto
       return <article key={plan.id} className={`plan-list-card plan-select-card ${selected ? "selected" : ""}`}>
         <span className="plan-number">{index + 1}</span>
         <span className="plan-list-copy"><strong>{plan.name}</strong><small>{plan.focus}</small><small>{plan.durationMinutes} min · {plan.exercises.length} activities</small>{isNormalNext && <small className="tag-current">Normal next plan</small>}{selected && <small className="tag-current">Selected for next session</small>}</span>
-        <div className="plan-card-actions"><button className="button button-secondary plan-edit-button" onClick={() => onEditMaster(plan.id)}>Edit</button></div>
+        <div className="plan-card-actions"><button className="button button-secondary plan-edit-button" onClick={() => onEditMaster(plan.id)}>Edit</button><button className="button button-secondary plan-select-button" disabled={hasActive} onClick={() => onChooseOverride(plan)}>{isNormalNext ? "Next" : selected ? "Clear" : "Use once"}</button></div>
       </article>;
     })}</div>
     {override && <button className="button button-secondary button-large" onClick={() => onChooseOverride(nextPlan)} disabled={hasActive}><RotateCcw size={17} /> Clear temporary workout</button>}
@@ -273,7 +273,7 @@ function PlanEditor({ plan, mode, onCancel, onSave }) {
     if (!name) { setValidation("Give this plan a name before saving."); return; }
     if (!draft.exercises.length) { setValidation("Add at least one activity before saving."); return; }
     if (draft.exercises.some((exercise) => !exercise.name.trim())) { setValidation("Every activity needs a name, or remove the empty activity."); return; }
-    const normalized = normalizePlan({ ...draft, name, focus: draft.focus.trim(), exercises: draft.exercises.map((exercise, index) => normalizeExercise({ ...exercise, name: exercise.name.trim() }, index, draft.id)) });
+    const normalized = normalizePlan({ ...draft, name, focus: draft.focus.trim(), exercises: draft.exercises.map((exercise, index) => normalizeExercise(exercise, index, draft.id)) });
     onSave({ ...normalized, sourcePlanId: draft.sourcePlanId || draft.id, isCustomized: temporary ? true : undefined, temporary: temporary || undefined });
   }
   return <div className="page-stack editor-page">
@@ -294,7 +294,7 @@ function PlanEditor({ plan, mode, onCancel, onSave }) {
       {exercise.type === "distance" && <div className="field-grid"><label className="field-label">Target distance<input value={exercise.distance} onChange={(event) => updateExercise(index, "distance", event.target.value)} placeholder="3" /></label><label className="field-label">Unit<select value={exercise.distanceUnit} onChange={(event) => updateExercise(index, "distanceUnit", event.target.value)}><option value="km">Kilometres (km)</option><option value="mi">Miles (mi)</option><option value="m">Metres (m)</option></select></label></div>}
       <label className="field-label">Notes (optional)<textarea value={exercise.notes} onChange={(event) => updateExercise(index, "notes", event.target.value)} rows="2" placeholder="Form cues, alternatives, pace, equipment…" /></label>
     </section>)}
-    <div className="editor-section-heading"><button className="button button-secondary add-activity-button" onClick={addExercise}><Plus size={16} /> Add activity</button></div>
+    <div className="editor-section-heading" style={{ display: "flex", justifyContent: "flex-end" }}><button className="button button-secondary add-activity-button" onClick={addExercise}><Plus size={16} /> Add activity</button></div>
     {validation && <div className="validation-message" role="alert">{validation}</div>}
     <div className="editor-footer"><button className="button button-primary button-large" onClick={save}><Check size={18} /> {temporary ? "Save temporary workout" : "Save master plan"}</button><button className="button button-secondary button-large" onClick={onCancel}><X size={17} /> Cancel</button></div>
     <p className="editor-footnote">{temporary ? "This custom version is discarded after the next workout is completed or abandoned. Cancel leaves the current plan unchanged." : "Reordering, adding, editing or deleting activities affects the master plan only. An active workout is not modified."}</p>
